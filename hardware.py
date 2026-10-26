@@ -43,6 +43,7 @@ def _run(command, timeout=15):
 def choose_backend(info, force_cpu=False):
     """Choose only CUDA builds published for the pinned PyTorch 2.8 release."""
     result = dict(info)
+    result["gpu_names"] = [name for name in (info.get("gpu_names") or []) if isinstance(name, str) and name.strip()]
     logical = int(info.get("logical_cores") or os.cpu_count() or 4)
     physical = int(info.get("physical_cores") or logical)
     result.update(cpu_threads=max(1, min(8, physical)), backend="cpu", device="cpu", gpu_index=None)
@@ -71,7 +72,7 @@ def choose_backend(info, force_cpu=False):
                       reason=f"检测到 {gpu['name']}，选择 PyTorch 2.8 {backend}；运行时还会验证 GPU 运算")
     elif info.get("nvidia_gpus"):
         result["reason"] = "NVIDIA 驱动或 GPU 架构未满足本项目 CUDA 构建条件，使用 CPU"
-    elif any("amd" in name.lower() or "radeon" in name.lower() for name in info.get("gpu_names", [])):
+    elif any("amd" in name.lower() or "radeon" in name.lower() for name in result["gpu_names"]):
         result["reason"] = "检测到 AMD 显卡；本项目的 Windows/PyTorch 2.8 配置使用 CPU，不安装 CUDA 或 DirectML"
     else:
         result["reason"] = "未检测到可用的 NVIDIA CUDA 设备，使用 CPU"

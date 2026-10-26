@@ -4,7 +4,7 @@
     [switch]$CheckOnly,
     [switch]$SetupOnly,
     [ValidateSet('auto', 'cpu')][string]$Device = 'auto',
-    [ValidateSet('nano', 'sensevoice', 'paraformer')][string]$Model,
+    [ValidateSet('nano', 'sensevoice', 'paraformer', 'ensemble')][string]$Model,
     [ValidateRange(1024, 65525)][int]$Port = 8765
 )
 $ErrorActionPreference = 'Stop'

@@ -20,6 +20,11 @@ def nvidia_info(cuda="12.8", capability=8.6, memory=8192):
 
 
 class HardwareSelection(unittest.TestCase):
+    def test_empty_gpu_names_from_windows_do_not_prevent_startup(self):
+        plan = choose_backend({"gpu_names": [None, "", "AMD Radeon"]})
+        self.assertEqual(plan["gpu_names"], ["AMD Radeon"])
+        self.assertEqual(plan["backend"], "cpu")
+
     def test_amd_windows_keeps_cpu_and_uses_physical_cores(self):
         plan = choose_backend({"logical_cores": 12, "physical_cores": 6,
                                "gpu_names": ["AMD Radeon(TM) Graphics"]})
@@ -93,7 +98,7 @@ class PersistentSettings(unittest.TestCase):
             self.assertTrue(restored.snapshot().enabled)
 
     def test_default_prompt_sets_editorial_boundaries(self):
-        for requirement in ("没有听到原始音频", "同一句话", "不同说话人", "无法确定时保留原文", "不总结", "不漏行", "时间戳"):
+        for requirement in ("不能声称已经听过原音频", "同一件事", "不再拆分", "不总结", "不漏行", "时间无需推断"):
             self.assertIn(requirement, PROMPT)
 
 

@@ -14,8 +14,14 @@ os.environ.setdefault("NUMBA_CACHE_DIR", str(ROOT / "models" / "numba"))
 os.environ.setdefault("PYTHONUTF8", "1")
 
 
-def load_pipeline(profile=None):
+def load_pipeline(profile=None, primary=None, reference=None, qwen_settings=None):
     profile = profile or selected_profile()
+    if profile == "ensemble":
+        from backend.ensemble import SequentialEnsemble
+        from asr_config import selected_ensemble
+        choice = selected_ensemble()
+        return SequentialEnsemble(prepare=True, primary=primary or choice["primary"],
+                                  reference=reference or choice["reference"], qwen_settings=qwen_settings)
     from hardware import memory_status
     memory = memory_status()
     minimum = {"nano": 6, "sensevoice": 1.5, "paraformer": 1.5}[profile]

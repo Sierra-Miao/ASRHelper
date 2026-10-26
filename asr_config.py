@@ -11,8 +11,18 @@ PROFILES = {
                    "vad_model": "fsmn-vad", "punc_model": "ct-punc", "spk_model": "cam++"},
     "sensevoice": {"label": "SenseVoice Small · 多语言均衡", "model": "iic/SenseVoiceSmall",
                    "vad_model": "fsmn-vad", "punc_model": "ct-punc", "spk_model": "cam++"},
+    "ensemble": {"label": "双模型 · 传统模型主稿 + LLM 语音参考"},
 }
 CATALOG = {
+    "ensemble": {"name": "双模型交叉核对", "parameters": "传统侧 SenseVoice / Paraformer；LLM 侧 Fun-ASR-Nano / 在线 Qwen3-ASR",
+                 "download": "两种模型及公共组件，已下载文件复用",
+                 "memory": "串行运行；Nano 建议留出 6 GB 可用内存；Qwen 在线识别不加载本地 LLM 权重",
+                 "scenarios": "口语会议、疑难词或局部乱码；传统侧提供时间与说话人，AI 对照 LLM 转写处理疑难内容",
+                 "languages": "随所选组合变化；Qwen 支持多语言自动识别",
+                 "numbers": "两个模型分别开启数字规范化；有冲突时由 AI 结合上下文判断并保留存疑项",
+                 "timing": "以传统模型为主；参考时间仅匹配音频范围，不替换主稿说话人与时间",
+                 "requirements": "传统模型 + 本地 Nano 或 DashScope SDK / Qwen API Key；在线模式上传音频并按服务商规则计费；参考失败保留主稿",
+                 "source": "https://github.com/modelscope/FunASR"},
     "nano": {"name": "Fun-ASR-Nano 2512", "parameters": "约 8 亿（800M）", "download": "主模型约 3–4 GB，另需 VAD / CAM++",
              "memory": "建议至少 12 GB 系统内存、加载前可用内存 ≥ 6 GB；CUDA 建议 6 GB 以上显存；CPU 可运行但较慢",
              "scenarios": "中文会议、口音和方言、嘈杂或较远距离录音、专业术语；优先追求识别质量",
@@ -40,6 +50,18 @@ CATALOG = {
 }
 
 
+def selected_ensemble(data_dir=None):
+    data_dir = Path(data_dir or os.environ.get("FUNASR_DATA_DIR", ROOT / "data"))
+    try:
+        saved = json.loads((data_dir / "asr_settings.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError):
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    return {"primary": saved.get("primary") if saved.get("primary") in {"sensevoice", "paraformer"} else "sensevoice",
+            "reference": saved.get("reference") if saved.get("reference") in {"nano", "qwen"} else "nano"}
+
+
 def selected_profile(data_dir=None):
     saved = "nano"
     data_dir = Path(data_dir or os.environ.get("FUNASR_DATA_DIR", ROOT / "data"))
@@ -49,7 +71,7 @@ def selected_profile(data_dir=None):
         pass
     value = os.environ.get("FUNASR_ASR_MODEL", str(saved)).strip().lower()
     if value not in PROFILES:
-        raise ValueError("模型选项必须为 nano、sensevoice 或 paraformer")
+        raise ValueError("模型选项必须为 nano、sensevoice、paraformer 或 ensemble")
     return value
 
 
@@ -91,8 +113,11 @@ def local_models(profile=None, root=ROOT):
     return found
 
 
-def models_ready(profile=None, root=ROOT):
+def models_ready(profile=None, root=ROOT, primary=None, reference=None):
     profile = profile or selected_profile()
+    if profile == "ensemble":
+        choice = selected_ensemble()
+        return models_ready(primary or choice["primary"], root) and ((reference or choice["reference"]) == "qwen" or models_ready("nano", root))
     required = set(PROFILES[profile]) - {"label"}
     return required <= local_models(profile, root).keys()
 

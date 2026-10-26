@@ -13,6 +13,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .config import AISettings, PROMPT, ROOT, SettingsStore
 from .llm import CorrectionError, test_connection
 from .service import TranscriptionService
+from .qwen import QwenSettings
 
 MAX_UPLOAD = 512 * 1024 * 1024
 ALLOWED = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma", ".aiff", ".aif", ".mp4", ".webm", ".mkv", ".mov"}
@@ -64,13 +65,29 @@ def create_app(service=None, settings_store=None):
     class ModelSelection(BaseModel):
         profile: str
         allow_download: bool = False
+        primary: str | None = None
+        reference: str | None = None
 
     @app.post("/api/models/activate", status_code=202)
     def activate_model(body: ModelSelection):
         try:
-            return service.activate_model(body.profile, body.allow_download)
+            return service.activate_model(body.profile, body.allow_download, body.primary, body.reference)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/qwen-settings")
+    def qwen_settings():
+        return service.qwen_store.public()
+
+    class QwenUpdate(QwenSettings):
+        keep_key: bool = True
+
+    @app.put("/api/qwen-settings")
+    def save_qwen(body: QwenUpdate):
+        with service.lock:
+            if service.model_catalog()["busy"]:
+                raise HTTPException(409, "任务或模型切换正在进行，请完成后修改在线识别配置")
+            return service.qwen_store.update(QwenSettings(**body.model_dump(exclude={"keep_key"})), body.keep_key)
 
     @app.get("/api/settings")
     def settings():
@@ -93,7 +110,8 @@ def create_app(service=None, settings_store=None):
             raise HTTPException(400, "请先保存 API 地址和模型名称")
         try:
             await run_in_threadpool(test_connection, settings)
-            return {"ok": True, "message": "连接成功。附件模式还需要服务商支持 Files 和 Excel 输入。" if settings.transport == "file" else "连接成功"}
+            message = "Agent 模式无需 API。下载交接包，在客户端运行 Skill 并直接获取整理后的 Excel。" if settings.transport == "agent" else "连接成功。附件模式还需要服务商支持 Files 和 Excel 输入。" if settings.transport == "file" else "连接成功"
+            return {"ok": True, "message": message}
         except CorrectionError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -159,20 +177,40 @@ def create_app(service=None, settings_store=None):
 
     @app.get("/api/jobs/{job_id}/download/{variant}")
     def download(job_id: str, variant: str):
-        files = {"original": ("original.xlsx", "原始识别.xlsx"), "corrected": ("corrected.xlsx", "AI校对.xlsx"), "bundle": ("results.zip", "识别与校对.zip")}
+        files = {"original": ("original.xlsx", "原始识别.xlsx"), "corrected": ("corrected.xlsx", "AI校对.xlsx"),
+                 "bundle": ("results.zip", "识别与校对.zip"), "paragraphs": ("paragraphs.xlsx", "发言合并.xlsx"),
+                 "reference": ("nano-reference.xlsx", "Nano参考.xlsx"), "agent": ("agent-review.zip", "Agent校对包.zip")}
         try:
             job = service.get(job_id)
             if variant not in files:
                 raise KeyError(variant)
             name, label = files[variant]
+            if variant == "reference" and (service.directory(job_id) / "llm-reference.xlsx").is_file():
+                name, label = "llm-reference.xlsx", "Qwen参考.xlsx"
             path = service.directory(job_id) / name
             if not path.is_file():
                 raise KeyError(variant)
             stem = Path(job["filename"]).stem
-            media = "application/zip" if variant == "bundle" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            media = "application/zip" if variant in {"bundle", "agent"} else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             return FileResponse(path, filename=f"{stem}_{label}", media_type=media)
         except KeyError as exc:
             raise HTTPException(404, "结果文件尚未生成") from exc
+
+    @app.get("/api/agent-skill")
+    def agent_skill():
+        from .handoff import write_skill_archive
+        path = write_skill_archive(service.data_dir / "asr-paragraph-review.zip")
+        return FileResponse(path, filename="asr-paragraph-review.zip", media_type="application/zip")
+
+    @app.post("/api/jobs/{job_id}/agent-package")
+    async def agent_package(job_id: str):
+        try:
+            prompt = await run_in_threadpool(service.prepare_agent, job_id, store.snapshot())
+            return {"prompt": prompt, "job": service.public(job_id)}
+        except KeyError as exc:
+            raise HTTPException(404, "任务不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="frontend")
     return app

@@ -1,0 +1,4 @@
+interface:
+  display_name: "语音转写段落整理"
+  short_description: "合并同一人的连续发言，对照传统主稿与 Nano / Qwen 参考，直接交还 Excel 文件"
+  default_prompt: "使用 $asr-paragraph-review 整理附件里的语音转写交接包，直接生成并交还 AI整理.xlsx。"

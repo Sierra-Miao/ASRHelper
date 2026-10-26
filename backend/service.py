@@ -15,9 +15,11 @@ from .config import DATA
 from .excel import normalize_segments, write_excel
 from .llm import CorrectionError, correct_workbook
 from hardware import hardware_plan, memory_status
-from asr_config import CATALOG, PROFILES, selected_profile, models_ready, recognition_options
+from asr_config import CATALOG, PROFILES, selected_profile, selected_ensemble, models_ready, recognition_options
+from .qwen import QwenStore
 from .diagnostics import coverage
 from .numbers import normalize_numbers
+from .paragraphs import local_paragraphs
 
 ACTIVE = {"queued", "loading", "decoding", "transcribing", "exporting", "correcting"}
 
@@ -46,6 +48,8 @@ class TranscriptionService:
         self.model = None
         self.model_state = "not_loaded"
         self.profile = selected_profile(data_dir)
+        self.ensemble = selected_ensemble(data_dir)
+        self.qwen_store = QwenStore(data_dir / "qwen_settings.json")
         self.model_action = {"status": "idle", "profile": self.profile, "message": "", "error": ""}
         self.hardware = hardware_plan()
         self.device = f"CPU · {self.hardware['cpu_threads']} 线程"
@@ -70,25 +74,42 @@ class TranscriptionService:
             busy = self.model_action["status"] == "loading" or any(j["status"] in ACTIVE for j in self.jobs.values())
             return {"selected": self.profile, "loaded": self.model is not None,
                     "busy": busy, "action": copy.deepcopy(self.model_action),
-                    "memory": memory_status(),
-                    "models": [{"id": key, **item, "ready": models_ready(key),
+                    "memory": memory_status(), "ensemble": dict(self.ensemble), "qwen": self.qwen_store.public(),
+                    "models": [{"id": key, **item, "ready": self.profile_ready(key),
                                 "selected": key == self.profile} for key, item in CATALOG.items()],
-                    "note": "内存和下载量为本项目估算，不是硬件最低要求；音频时长和缓存复用会影响占用。所有模型均通过额外 CAM++ 区分匿名说话人。"}
+                    "note": "内存和下载量为本项目估算；传统模型通过 CAM++ 区分匿名说话人。Qwen 是在线参考，不下载权重；使用时将上传音频，可能产生费用。"}
 
-    def activate_model(self, profile, allow_download=False):
+    def profile_ready(self, profile, choice=None):
+        if profile != "ensemble":
+            return models_ready(profile)
+        choice = choice or self.ensemble
+        return models_ready("ensemble", **choice) and (choice["reference"] != "qwen" or self.qwen_store.public()["ready"])
+
+    def load_selected(self, profile, choice=None):
+        from transcribe import load_pipeline
+        if profile == "ensemble":
+            return load_pipeline(profile, **(choice or self.ensemble), qwen_settings=self.qwen_store.snapshot())
+        return load_pipeline(profile)
+
+    def activate_model(self, profile, allow_download=False, primary=None, reference=None):
         if profile not in PROFILES:
             raise ValueError("不支持此模型")
         with self.lock:
+            choice = {"primary": primary or self.ensemble["primary"], "reference": reference or self.ensemble["reference"]}
+            if choice["primary"] not in {"sensevoice", "paraformer"} or choice["reference"] not in {"nano", "qwen"}:
+                raise ValueError("双模型须选择一个传统模型和一个 LLM 语音模型")
+            if profile == "ensemble" and choice["reference"] == "qwen" and not self.qwen_store.public()["ready"]:
+                raise ValueError("请先保存 Qwen3-ASR 的 DashScope API Key")
             if self.model_action["status"] == "loading" or any(j["status"] in ACTIVE for j in self.jobs.values()):
                 raise ValueError("正在处理任务，请完成后再切换模型")
-            if not models_ready(profile) and not allow_download:
+            if not self.profile_ready(profile, choice) and not allow_download:
                 raise ValueError("模型尚未下载，请点击“下载并切换”确认下载")
             self.model_action = {"status": "loading", "profile": profile,
                                  "message": "正在下载缺失文件并加载模型；首次下载可能需要几分钟，请保持启动窗口打开", "error": ""}
-            self.executor.submit(self._activate_model, profile)
+            self.executor.submit(self._activate_model, profile, choice)
         return self.model_catalog()
 
-    def _activate_model(self, profile):
+    def _activate_model(self, profile, choice=None):
         try:
             # Unload first so model switching does not hold two large models in RAM.
             self.model = None
@@ -98,13 +119,14 @@ class TranscriptionService:
             torch = sys.modules.get("torch")
             if torch is not None and torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            from transcribe import load_pipeline
-            model = load_pipeline(profile)
+            choice = choice or self.ensemble
+            model = self.load_selected(profile, choice)
             temporary = self.data_dir / "asr_settings.json.tmp"
-            temporary.write_text(json.dumps({"profile": profile}), encoding="utf-8")
+            temporary.write_text(json.dumps({"profile": profile, **choice}), encoding="utf-8")
             temporary.replace(self.data_dir / "asr_settings.json")
             with self.lock:
                 self.model, self.profile = model, profile
+                self.ensemble = dict(choice)
                 self.model_state = "ready"
                 device = str(model.kwargs.get("device", "cpu"))
                 self.device = f"CPU · {self.hardware['cpu_threads']} 线程" if device == "cpu" else device.upper()
@@ -142,12 +164,17 @@ class TranscriptionService:
             job["warnings"] = list(dict.fromkeys(job.get("warnings", []) + warnings))
         job["downloads"] = {}
         job["device"] = self.device
-        for variant, name in (("original", "original.xlsx"), ("corrected", "corrected.xlsx"), ("bundle", "results.zip")):
+        for variant, name in (("original", "original.xlsx"), ("corrected", "corrected.xlsx"), ("bundle", "results.zip"),
+                              ("paragraphs", "paragraphs.xlsx"), ("reference", "nano-reference.xlsx"), ("agent", "agent-review.zip")):
             if (directory / name).is_file():
                 job["downloads"][variant] = f"/api/jobs/{job_id}/download/{variant}"
+        if (directory / "llm-reference.xlsx").is_file():
+            job["downloads"]["reference"] = f"/api/jobs/{job_id}/download/reference"
         if not include_rows:
             job.pop("rows", None)
             job.pop("corrected_rows", None)
+            job.pop("paragraph_rows", None)
+            job.pop("reference_rows", None)
         return job
 
     def history(self):
@@ -160,7 +187,7 @@ class TranscriptionService:
         with self.lock:
             if self.model_action["status"] == "loading":
                 raise ValueError("模型正在下载或切换，请稍后上传")
-            if self.model is None and not models_ready(self.profile):
+            if (self.model is None or self.profile == "ensemble") and not self.profile_ready(self.profile):
                 raise ValueError("请先在“语音模型”中下载并启用一个模型")
             self.directory(job_id).mkdir(parents=True)
             self.jobs[job_id] = {"id": job_id, "filename": safe_name(filename), "speakers": speakers,
@@ -168,6 +195,10 @@ class TranscriptionService:
                 "use_ai": use_ai, "created_at": datetime.now(timezone.utc).isoformat(),
                 "status": "queued", "stage": "等待处理", "rows": [], "corrected_rows": [],
                 "duration_ms": 0, "error": "", "ai_error": "", "warnings": []}
+            if self.profile == "ensemble":
+                self.jobs[job_id].update(ensemble=dict(self.ensemble),
+                    reference_model="Fun-ASR-Nano" if self.ensemble["reference"] == "nano" else "Qwen3-ASR",
+                    asr_model=f"双模型 · {PROFILES[self.ensemble['primary']]['label']} + {'Fun-ASR-Nano' if self.ensemble['reference'] == 'nano' else 'Qwen3-ASR 在线参考'}")
         self.update(job_id)
         return job_id
 
@@ -193,25 +224,35 @@ class TranscriptionService:
             if self.model is None:
                 self.model_state = "loading"
                 self.update(job_id, status="loading", stage="正在加载所选语音模型，首次加载需要一些时间")
-                from transcribe import load_pipeline
-                self.model = load_pipeline(self.profile)
+                self.model = self.load_selected(self.profile)
                 self.model_state = "ready"
                 device = str(self.model.kwargs.get("device", "cpu"))
                 self.device = (f"CPU · {self.hardware['cpu_threads']} 线程" if device == "cpu" else device.upper())
             self.update(job_id, status="transcribing", stage="正在识别语音与说话人")
             speakers = self.get(job_id)["speakers"]
             options = recognition_options(self.profile, speakers)
-            result = self.model.generate(input=str(decoded), **options)
-            rows = normalize_segments(result)
-            for row in rows:
-                row["content"] = normalize_numbers(row["content"])
-            report, warnings = coverage(rows, self.get(job_id)["duration_ms"])
-            self.update(job_id, status="exporting", stage="正在生成原始 Excel", rows=rows,
-                        coverage=report, warnings=warnings)
-            original_pending = directory / "original.pending.xlsx"
-            write_excel(rows, original_pending, "原始识别")
-            original_pending.replace(directory / "original.xlsx")
-            (directory / "asr.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            if self.profile == "ensemble":
+                if self.ensemble["reference"] == "qwen":
+                    self.model.qwen_settings = self.qwen_store.snapshot()
+                result = self.model.generate(input=str(decoded), **options,
+                    primary_callback=lambda primary: self.save_primary(job_id, primary),
+                    progress=lambda stage: self.update(job_id, status="transcribing", stage=stage))
+                references = []
+                if self.model.reference_result:
+                    try:
+                        references = normalize_segments(self.model.reference_result)
+                    except ValueError:
+                        self.model.warnings.append("LLM 语音模型未返回有效参考句段，本次仅使用传统模型主稿。")
+                if references:
+                    name = "nano-reference.xlsx" if self.ensemble["reference"] == "nano" else "llm-reference.xlsx"
+                    write_excel(references, directory / name, "LLM语音参考")
+                (directory / "reference-asr.json").write_text(json.dumps(self.model.reference_result, ensure_ascii=False, indent=2), encoding="utf-8")
+                job = self.get(job_id)
+                self.update(job_id, reference_rows=references, reference_status="completed" if references else "failed",
+                            warnings=list(dict.fromkeys(job.get("warnings", []) + self.model.warnings)))
+            else:
+                result = self.model.generate(input=str(decoded), **options)
+                self.save_primary(job_id, result)
             if self.get(job_id)["use_ai"]:
                 self.correct(job_id, settings)
             else:
@@ -231,26 +272,66 @@ class TranscriptionService:
             audio_path.unlink(missing_ok=True)
             decoded.unlink(missing_ok=True)
             settings.api_key = ""
+            if self.profile == "ensemble" and getattr(self.model, "qwen_settings", None):
+                self.model.qwen_settings.api_key = ""
+
+    def save_primary(self, job_id, result):
+        directory = self.directory(job_id)
+        rows = normalize_segments(result)
+        for row in rows:
+            row["content"] = normalize_numbers(row["content"])
+        paragraphs = local_paragraphs(rows)
+        report, warnings = coverage(rows, self.get(job_id)["duration_ms"])
+        original_pending = directory / "original.pending.xlsx"
+        write_excel(rows, original_pending, "原始识别")
+        original_pending.replace(directory / "original.xlsx")
+        write_excel(paragraphs, directory / "paragraphs.xlsx", "本机发言合并")
+        (directory / "asr.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.update(job_id, rows=rows, paragraph_rows=paragraphs, coverage=report, warnings=warnings)
+
+    def save_correction(self, job_id, rows, warnings=()):
+        directory = self.directory(job_id)
+        temporary = directory / "corrected.pending.xlsx"
+        write_excel(rows, temporary, "AI 段落整理")
+        temporary.replace(directory / "corrected.xlsx")
+        with zipfile.ZipFile(directory / "results.pending.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.write(directory / "original.xlsx", "原始识别.xlsx")
+            archive.write(directory / "corrected.xlsx", "AI校对.xlsx")
+            if (directory / "nano-reference.xlsx").is_file():
+                archive.write(directory / "nano-reference.xlsx", "Nano参考.xlsx")
+            if (directory / "llm-reference.xlsx").is_file():
+                archive.write(directory / "llm-reference.xlsx", "Qwen参考.xlsx")
+        (directory / "results.pending.zip").replace(directory / "results.zip")
+        job = self.get(job_id)
+        self.update(job_id, corrected_rows=rows, warnings=list(dict.fromkeys(job.get("warnings", []) + list(warnings))),
+                    status="completed", agent_pending=False, stage="识别与 AI 段落整理完成")
+
+    def prepare_agent(self, job_id, settings):
+        from .handoff import build_handoff
+        with self.lock:
+            job = self.get(job_id)
+            if job["status"] in ACTIVE:
+                raise ValueError("任务仍在处理中，请完成后导出 Agent 校对包")
+            if not (self.directory(job_id) / "original.xlsx").is_file():
+                raise ValueError("原始表格尚未就绪")
+            return build_handoff(settings, self.directory(job_id), job)
 
     def correct(self, job_id, settings):
         directory = self.directory(job_id)
         try:
             self.update(job_id, status="correcting", stage="AI 正在校对表格", ai_error="", use_ai=True)
             job = self.get(job_id)
+            if settings.transport == "agent":
+                from .handoff import build_handoff
+                build_handoff(settings, directory, job)
+                self.update(job_id, status="completed", stage="Agent 交接包已就绪，请在客户端完成整理并直接下载 Excel", agent_pending=True)
+                return
+            extra = {"reference_rows": job["reference_rows"]} if job.get("reference_rows") else {}
             rows, warnings = correct_workbook(settings, directory / "original.xlsx", job["rows"],
-                lambda stage: self.update(job_id, stage=stage))
-            # Replace only after the entire correction has passed validation.
-            temporary = directory / "corrected.pending.xlsx"
-            write_excel(rows, temporary, "AI 校对")
-            temporary.replace(directory / "corrected.xlsx")
-            with zipfile.ZipFile(directory / "results.pending.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-                archive.write(directory / "original.xlsx", "原始识别.xlsx")
-                archive.write(directory / "corrected.xlsx", "AI校对.xlsx")
-            (directory / "results.pending.zip").replace(directory / "results.zip")
-            self.update(job_id, corrected_rows=rows, warnings=list(dict.fromkeys(job.get("warnings", []) + warnings)),
-                        status="completed", stage="识别与 AI 校对完成")
+                lambda stage: self.update(job_id, stage=stage), **extra)
+            self.save_correction(job_id, rows, warnings)
         except Exception as exc:
-            message = str(exc) if isinstance(exc, CorrectionError) else "AI 校对未完成，请检查接口配置后重试"
+            message = str(exc) if isinstance(exc, CorrectionError) else "Agent 交接包生成失败，请检查本机文件读写后重试" if settings.transport == "agent" else "AI 校对未完成，请检查接口配置后重试"
             self.update(job_id, status="completed", stage="原始 Excel 已就绪，AI 校对未完成", ai_error=message)
         finally:
             settings.api_key = ""
