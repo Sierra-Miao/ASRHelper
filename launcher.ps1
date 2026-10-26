@@ -4,6 +4,7 @@
     [switch]$CheckOnly,
     [switch]$SetupOnly,
     [ValidateSet('auto', 'cpu')][string]$Device = 'auto',
+    [ValidateSet('nano', 'sensevoice', 'paraformer')][string]$Model,
     [ValidateRange(1024, 65525)][int]$Port = 8765
 )
 $ErrorActionPreference = 'Stop'
@@ -13,6 +14,7 @@ Set-Location -LiteralPath $PSScriptRoot
 $env:PYTHONUTF8 = '1'
 $env:UV_CACHE_DIR = Join-Path $PSScriptRoot '.uv-cache'
 $env:FUNASR_DEVICE = $Device
+if ($Model) { $env:FUNASR_ASR_MODEL = $Model }
 $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 $approved = $false
 
@@ -103,7 +105,7 @@ try {
             Write-Host '缺失或版本不匹配的依赖：'
             $report.missing | ForEach-Object { Write-Host "  $_" }
         }
-        Confirm-Install '需要创建/修复本目录的独立 Python 3.12 环境，自动按硬件选择 CPU/CUDA 依赖。首次还会下载约 2.2 GB 模型；不会更改全局 Python 包。'
+        Confirm-Install '需要创建/修复本目录的独立 Python 3.12 环境，自动按硬件选择 CPU/CUDA 依赖。模型可在网页中选择并确认下载；不会更改全局 Python 包。'
         $approved = $true
         $uv = Find-Uv
         if (-not $uv) { $uv = Install-LocalUv }
@@ -142,9 +144,15 @@ try {
         }
     }
     if (-not $report.models_ready) {
-        if (-not $approved) { Confirm-Install '所需 FunASR 模型尚未下载齐全。将从 ModelScope 官方模型仓库下载约 2.2 GB 文件到本目录。' }
-        & $python (Join-Path $PSScriptRoot 'transcribe.py') --prepare
-        if ($LASTEXITCODE -ne 0) { throw '模型准备失败，请检查网络后重新启动。' }
+        if ($SetupOnly) {
+            if (-not $approved) { Confirm-Install '所选语音模型尚未下载齐全。将从官方模型仓库下载到本目录；下载量取决于所选模型。' }
+            & $python (Join-Path $PSScriptRoot 'transcribe.py') --prepare
+            if ($LASTEXITCODE -ne 0) { throw '模型准备失败，请检查网络后重新启动。' }
+        } elseif ($NoInstall) {
+            throw '所选模型缺失；NoInstall 模式不会下载模型。可不带此参数启动后在网页选择已下载模型。'
+        } else {
+            Write-Host '所选语音模型尚未准备好，请在网页“语音模型”中选择并点击“下载并切换”。' -ForegroundColor Yellow
+        }
     }
     Write-Host '环境检查通过。' -ForegroundColor Green
     if ($SetupOnly) { exit 0 }

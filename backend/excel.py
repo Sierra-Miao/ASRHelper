@@ -1,4 +1,5 @@
 import math
+import re
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -21,7 +22,10 @@ def normalize_segments(result):
     rows = []
     for item in result:
         for segment in item.get("sentence_info", []):
-            text = str(segment.get("text", segment.get("sentence", ""))).strip()
+            text = re.sub(r"<\|[^>]*\|>", "", str(segment.get("text", segment.get("sentence", "")))).strip()
+            # Some native-ITN recognizers already punctuate their output, and the
+            # companion punctuation model can add a second copy at boundaries.
+            text = re.sub(r"([，。！？；：,.!?;:])\1+", r"\1", text).lstrip("，,。.").strip()
             if not text:
                 continue
             start, end = float(segment["start"]), float(segment["end"])

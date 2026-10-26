@@ -22,7 +22,7 @@ function selectFile(file) {
   clearFile(); state.file = file; state.objectUrl = URL.createObjectURL(file);
   $("#selected-name").textContent = file.name; $("#selected-size").textContent = sizeText(file.size);
   $("#selected-file").hidden = false; $("#audio-preview").src = state.objectUrl; $("#audio-preview").hidden = false;
-  $("#start-button").disabled = state.uploading;
+  updateStartAvailability();
 }
 function clearFile() { $("#audio-preview").pause(); $("#audio-preview").removeAttribute("src"); if (state.objectUrl) URL.revokeObjectURL(state.objectUrl); state.file = null; state.objectUrl = null; $("#file-input").value = ""; $("#selected-file").hidden = true; $("#audio-preview").hidden = true; $("#start-button").disabled = true; }
 $("#dropzone").addEventListener("click", () => $("#file-input").click());
@@ -44,6 +44,7 @@ function uploadForm(form) {
 }
 $("#start-button").addEventListener("click", async () => {
   if (!state.file || state.uploading) return;
+  if (!modelState?.models.find(item => item.id === modelState.selected)?.ready) return toast("请先在语音模型中下载并启用一个模型。");
   const speakerValue = $("#speakers").value === "custom" ? $("#custom-speakers").value : $("#speakers").value;
   if (speakerValue && (!Number.isInteger(Number(speakerValue)) || Number(speakerValue) < 1 || Number(speakerValue) > 30)) return toast("说话人数请输入 1–30 之间的整数。");
   if ($("#speakers").value === "custom" && !speakerValue) return toast("请填写说话人数。");
@@ -51,7 +52,7 @@ $("#start-button").addEventListener("click", async () => {
   state.uploading = true; $("#start-button").disabled = true; $("#start-text").textContent = "正在上传…";
   try { const job = await uploadForm(form); clearFile(); state.tab = "original"; state.page = 1; $("#search").value = ""; setJob(job); pollJob(job.id); await loadHistory(); }
   catch (error) { toast(error.message); }
-  finally { state.uploading = false; $("#start-text").textContent = "开始转写"; $("#start-button").disabled = !state.file; }
+  finally { state.uploading = false; $("#start-text").textContent = "开始转写"; updateStartAvailability(); }
 });
 
 function setJob(job) {
@@ -76,7 +77,7 @@ function renderJob() {
   if (state.tab === "corrected" && !job.corrected_rows?.length) state.tab = "original";
   $("#retry-ai").hidden = busy || !job.downloads?.original;
   $("#retry-ai").textContent = job.corrected_rows?.length || job.ai_error ? "重新 AI 校对" : "使用 AI 校对";
-  if (hasRows) { const speakers = new Set(job.rows.map(row => row.speaker)); $("#result-description").textContent = `${clock(job.duration_ms).split(".")[0]} · ${speakers.size} 位说话人 · ${job.rows.length} 个句段`; renderTable(); }
+  if (hasRows) { const speakers = new Set(job.rows.map(row => row.speaker)); $("#result-description").textContent = `${clock(job.duration_ms).split(".")[0]} · ${speakers.size} 位说话人 · ${job.rows.length} 个句段${job.coverage ? ` · 文字到 ${clock(job.coverage.last_end_ms).split(".")[0]}` : ""}`; renderTable(); }
 }
 function renderTable() {
   for (const variant of ["original", "corrected"]) { $(`#tab-${variant}`).classList.toggle("active", variant === state.tab); $(`#tab-${variant}`).setAttribute("aria-selected", String(variant === state.tab)); }
@@ -138,7 +139,7 @@ function openSettings() {
   $("#settings-enabled").checked = settings.enabled; $("#base-url").value = settings.base_url; $("#api-model").value = settings.model; $("#api-key").value = ""; $("#api-key").type = "password"; $("#show-key").textContent = "显示";
   $("#api-key").placeholder = settings.has_api_key ? "已保留当前 Key，留空则不更改" : "sk-…（本地模型可留空）";
   $("#key-state").textContent = settings.has_api_key ? "已保存到本机 JSON，重启自动恢复" : "保存到本机 JSON，重启无需重填";
-  $("#clear-key").hidden = !settings.has_api_key; $("#transport").value = settings.transport; $("#prompt").value = settings.prompt; $("#api-timeout").value = settings.timeout; $("#max-tokens").value = settings.max_tokens;
+  $("#clear-key").hidden = !settings.has_api_key; $("#transport").value = settings.transport; $("#prompt").value = settings.prompt; $("#api-timeout").value = settings.timeout; $("#max-tokens").value = settings.max_tokens; $("#batch-rows").value = settings.batch_rows ?? 100;
   state.clearKey = false; $("#settings-message").textContent = ""; updateTransportHint(); $("#settings-dialog").showModal();
 }
 document.querySelectorAll("[data-open-settings]").forEach(button => button.addEventListener("click", openSettings));
@@ -150,7 +151,7 @@ function updateTransportHint() { $("#transport-hint").textContent = $("#transpor
 $("#transport").addEventListener("change", updateTransportHint);
 async function saveSettings() {
   const body = { enabled: $("#settings-enabled").checked, base_url: $("#base-url").value.trim(), model: $("#api-model").value.trim(), api_key: $("#api-key").value.trim(), keep_key: !state.clearKey,
-    transport: $("#transport").value, prompt: $("#prompt").value.trim() || state.defaultPrompt, timeout: Number($("#api-timeout").value), max_tokens: Number($("#max-tokens").value) };
+    transport: $("#transport").value, prompt: $("#prompt").value.trim() || state.defaultPrompt, timeout: Number($("#api-timeout").value), max_tokens: Number($("#max-tokens").value), batch_rows: Number($("#batch-rows").value) };
   if (body.enabled && (!body.base_url || !body.model)) throw new Error("请填写 API 地址和模型名称。");
   const settings = await api("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   applySettings(settings); $("#api-key").value = ""; state.clearKey = false;
@@ -164,8 +165,8 @@ $("#test-api").addEventListener("click", async () => { const button = $("#test-a
   catch (error) { $("#settings-message").textContent = error.message; $("#settings-message").classList.add("error"); } finally { button.disabled = false; }
 });
 async function init() {
-  try { const [settings, health] = await Promise.all([api("/api/settings"), api("/api/health")]); applySettings(settings); $("#sidebar-model").textContent = `FunASR · ${health.device}`; await loadHistory(); const id = localStorage.getItem("tingjian.currentJob"); if (id) { try { const job = await api(`/api/jobs/${id}`); setJob(job); if (activeStates.has(job.status)) pollJob(id); } catch { localStorage.removeItem("tingjian.currentJob"); } } }
+  try { const [settings, health] = await Promise.all([api("/api/settings"), api("/api/health")]); applySettings(settings); $("#sidebar-model").textContent = `FunASR · ${health.device}`; await loadModels(); await loadHistory(); const id = localStorage.getItem("tingjian.currentJob"); if (id) { try { const job = await api(`/api/jobs/${id}`); setJob(job); if (activeStates.has(job.status)) pollJob(id); } catch { localStorage.removeItem("tingjian.currentJob"); } } }
   catch (error) { toast("无法连接本地服务，请确认启动窗口仍然打开。"); }
 }
-init();
+document.addEventListener("DOMContentLoaded", init, {once: true});
 setInterval(() => loadHistory().catch(() => {}), 10000);

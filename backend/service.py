@@ -6,13 +6,18 @@ import subprocess
 import threading
 import uuid
 import zipfile
+import gc
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from .config import DATA
 from .excel import normalize_segments, write_excel
 from .llm import CorrectionError, correct_workbook
-from hardware import hardware_plan
+from hardware import hardware_plan, memory_status
+from asr_config import CATALOG, PROFILES, selected_profile, models_ready, recognition_options
+from .diagnostics import coverage
+from .numbers import normalize_numbers
 
 ACTIVE = {"queued", "loading", "decoding", "transcribing", "exporting", "correcting"}
 
@@ -40,6 +45,8 @@ class TranscriptionService:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="funasr")
         self.model = None
         self.model_state = "not_loaded"
+        self.profile = selected_profile(data_dir)
+        self.model_action = {"status": "idle", "profile": self.profile, "message": "", "error": ""}
         self.hardware = hardware_plan()
         self.device = f"CPU · {self.hardware['cpu_threads']} 线程"
         self.jobs = {}
@@ -57,6 +64,55 @@ class TranscriptionService:
 
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
+
+    def model_catalog(self):
+        with self.lock:
+            busy = self.model_action["status"] == "loading" or any(j["status"] in ACTIVE for j in self.jobs.values())
+            return {"selected": self.profile, "loaded": self.model is not None,
+                    "busy": busy, "action": copy.deepcopy(self.model_action),
+                    "memory": memory_status(),
+                    "models": [{"id": key, **item, "ready": models_ready(key),
+                                "selected": key == self.profile} for key, item in CATALOG.items()],
+                    "note": "内存和下载量为本项目估算，不是硬件最低要求；音频时长和缓存复用会影响占用。所有模型均通过额外 CAM++ 区分匿名说话人。"}
+
+    def activate_model(self, profile, allow_download=False):
+        if profile not in PROFILES:
+            raise ValueError("不支持此模型")
+        with self.lock:
+            if self.model_action["status"] == "loading" or any(j["status"] in ACTIVE for j in self.jobs.values()):
+                raise ValueError("正在处理任务，请完成后再切换模型")
+            if not models_ready(profile) and not allow_download:
+                raise ValueError("模型尚未下载，请点击“下载并切换”确认下载")
+            self.model_action = {"status": "loading", "profile": profile,
+                                 "message": "正在下载缺失文件并加载模型；首次下载可能需要几分钟，请保持启动窗口打开", "error": ""}
+            self.executor.submit(self._activate_model, profile)
+        return self.model_catalog()
+
+    def _activate_model(self, profile):
+        try:
+            # Unload first so model switching does not hold two large models in RAM.
+            self.model = None
+            self.model_state = "loading"
+            gc.collect()
+            import sys
+            torch = sys.modules.get("torch")
+            if torch is not None and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            from transcribe import load_pipeline
+            model = load_pipeline(profile)
+            temporary = self.data_dir / "asr_settings.json.tmp"
+            temporary.write_text(json.dumps({"profile": profile}), encoding="utf-8")
+            temporary.replace(self.data_dir / "asr_settings.json")
+            with self.lock:
+                self.model, self.profile = model, profile
+                self.model_state = "ready"
+                device = str(model.kwargs.get("device", "cpu"))
+                self.device = f"CPU · {self.hardware['cpu_threads']} 线程" if device == "cpu" else device.upper()
+                self.model_action.update(status="completed", message="模型已切换，下次启动自动恢复", error="")
+        except Exception as exc:
+            logging.exception("Model download/load failed: %s", profile)
+            self.model_state = "not_loaded"
+            self.model_action.update(status="failed", message="模型未切换，原选择保留", error=recognition_error(exc, downloading=True))
 
     def directory(self, job_id):
         if not re.fullmatch(r"[a-f0-9]{32}", job_id):
@@ -80,6 +136,10 @@ class TranscriptionService:
     def public(self, job_id, include_rows=True):
         job = self.get(job_id)
         directory = self.directory(job_id)
+        if job.get("rows") and "coverage" not in job:
+            report, warnings = coverage(job["rows"], job.get("duration_ms", 0))
+            job["coverage"] = report
+            job["warnings"] = list(dict.fromkeys(job.get("warnings", []) + warnings))
         job["downloads"] = {}
         job["device"] = self.device
         for variant, name in (("original", "original.xlsx"), ("corrected", "corrected.xlsx"), ("bundle", "results.zip")):
@@ -97,9 +157,14 @@ class TranscriptionService:
 
     def register(self, filename, speakers, use_ai):
         job_id = uuid.uuid4().hex
-        self.directory(job_id).mkdir(parents=True)
         with self.lock:
+            if self.model_action["status"] == "loading":
+                raise ValueError("模型正在下载或切换，请稍后上传")
+            if self.model is None and not models_ready(self.profile):
+                raise ValueError("请先在“语音模型”中下载并启用一个模型")
+            self.directory(job_id).mkdir(parents=True)
             self.jobs[job_id] = {"id": job_id, "filename": safe_name(filename), "speakers": speakers,
+                "asr_profile": self.profile, "asr_model": PROFILES[self.profile]["label"],
                 "use_ai": use_ai, "created_at": datetime.now(timezone.utc).isoformat(),
                 "status": "queued", "stage": "等待处理", "rows": [], "corrected_rows": [],
                 "duration_ms": 0, "error": "", "ai_error": "", "warnings": []}
@@ -127,20 +192,22 @@ class TranscriptionService:
             self.update(job_id, duration_ms=round(info.duration * 1000))
             if self.model is None:
                 self.model_state = "loading"
-                self.update(job_id, status="loading", stage="首次加载四个模型，通常需要约 1–2 分钟")
+                self.update(job_id, status="loading", stage="正在加载所选语音模型，首次加载需要一些时间")
                 from transcribe import load_pipeline
-                self.model = load_pipeline()
+                self.model = load_pipeline(self.profile)
                 self.model_state = "ready"
                 device = str(self.model.kwargs.get("device", "cpu"))
                 self.device = (f"CPU · {self.hardware['cpu_threads']} 线程" if device == "cpu" else device.upper())
             self.update(job_id, status="transcribing", stage="正在识别语音与说话人")
-            options = {"batch_size_s": 60, "disable_pbar": True}
             speakers = self.get(job_id)["speakers"]
-            if speakers is not None:
-                options["preset_spk_num"] = speakers
+            options = recognition_options(self.profile, speakers)
             result = self.model.generate(input=str(decoded), **options)
             rows = normalize_segments(result)
-            self.update(job_id, status="exporting", stage="正在生成原始 Excel", rows=rows)
+            for row in rows:
+                row["content"] = normalize_numbers(row["content"])
+            report, warnings = coverage(rows, self.get(job_id)["duration_ms"])
+            self.update(job_id, status="exporting", stage="正在生成原始 Excel", rows=rows,
+                        coverage=report, warnings=warnings)
             original_pending = directory / "original.pending.xlsx"
             write_excel(rows, original_pending, "原始识别")
             original_pending.replace(directory / "original.xlsx")
@@ -150,9 +217,10 @@ class TranscriptionService:
             else:
                 self.update(job_id, status="completed", stage="识别完成，原始 Excel 已就绪")
         except Exception as exc:
+            logging.exception("ASR failed for job %s", job_id)
             if self.model is None:
                 self.model_state = "not_loaded"
-            message = str(exc) if isinstance(exc, (ValueError, FileNotFoundError)) else "识别未完成，请检查模型文件或音频格式后重试"
+            message = recognition_error(exc)
             if isinstance(exc, subprocess.TimeoutExpired):
                 message = "音频解码超时，请尝试缩短音频"
             if (directory / "original.xlsx").is_file():
@@ -179,7 +247,7 @@ class TranscriptionService:
                 archive.write(directory / "original.xlsx", "原始识别.xlsx")
                 archive.write(directory / "corrected.xlsx", "AI校对.xlsx")
             (directory / "results.pending.zip").replace(directory / "results.zip")
-            self.update(job_id, corrected_rows=rows, warnings=warnings,
+            self.update(job_id, corrected_rows=rows, warnings=list(dict.fromkeys(job.get("warnings", []) + warnings)),
                         status="completed", stage="识别与 AI 校对完成")
         except Exception as exc:
             message = str(exc) if isinstance(exc, CorrectionError) else "AI 校对未完成，请检查接口配置后重试"
@@ -189,6 +257,8 @@ class TranscriptionService:
 
     def retry_correction(self, job_id, settings):
         with self.lock:
+            if self.model_action["status"] == "loading":
+                raise ValueError("模型正在切换，请稍后校对")
             job = self.get(job_id)
             if job["status"] in ACTIVE:
                 raise ValueError("任务仍在处理中")
@@ -196,3 +266,16 @@ class TranscriptionService:
                 raise ValueError("尚无可校对的原始 Excel")
             self.update(job_id, status="queued", stage="等待 AI 校对", ai_error="", use_ai=True)
             self.executor.submit(self.correct, job_id, settings)
+
+
+def recognition_error(exc, downloading=False):
+    message = str(exc).lower()
+    if isinstance(exc, MemoryError) or any(text in message for text in (
+            "out of memory", "can't allocate memory", "cannot allocate memory", "not enough memory", "paging file", "页面文件")):
+        detail = str(exc) if isinstance(exc, MemoryError) and "当前可用内存" in str(exc) else "内存或显存不足。"
+        return detail + " 请关闭占内存程序，或在“语音模型”中切换至 SenseVoice / Paraformer 后重试。"
+    if downloading:
+        return "模型下载或加载失败，请检查网络、磁盘空间和启动窗口中的错误后重试。失败时不会保存新的模型选择。"
+    if isinstance(exc, (ValueError, FileNotFoundError)):
+        return str(exc)
+    return "识别未完成，请查看启动窗口中的错误，检查所选模型和音频后重试"

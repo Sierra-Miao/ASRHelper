@@ -131,7 +131,7 @@ class ExcelAndAI(unittest.TestCase):
         self.assertNotIn("secret", str(error.exception))
 
     def test_long_tables_are_processed_without_losing_rows(self):
-        rows = [dict(ROWS[0], start_ms=i * 1000, end_ms=i * 1000 + 900, content=f"第 {i + 1} 行") for i in range(85)]
+        rows = [dict(ROWS[0], start_ms=i * 1000, end_ms=i * 1000 + 900, content=f"第 {i + 1} 行") for i in range(205)]
         write_excel(rows, self.path)
         calls = []
         def handler(request):
@@ -142,7 +142,7 @@ class ExcelAndAI(unittest.TestCase):
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(groups)}}]})
         with httpx.Client(transport=httpx.MockTransport(handler)) as client:
             corrected, _ = correct_workbook(AISettings(base_url="http://mock.invalid", model="test"), self.path, rows, lambda _: None, client)
-        self.assertEqual(calls, [40, 40, 5])
+        self.assertEqual(calls, [100, 100, 5])
         self.assertEqual(corrected, rows)
 
 

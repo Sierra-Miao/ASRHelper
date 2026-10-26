@@ -57,6 +57,21 @@ def create_app(service=None, settings_store=None):
                 "status": "ok", "model_state": service.model_state, "device": service.device,
                 "hardware": service.hardware, "max_upload_mb": 512}
 
+    @app.get("/api/models")
+    def models():
+        return service.model_catalog()
+
+    class ModelSelection(BaseModel):
+        profile: str
+        allow_download: bool = False
+
+    @app.post("/api/models/activate", status_code=202)
+    def activate_model(body: ModelSelection):
+        try:
+            return service.activate_model(body.profile, body.allow_download)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.get("/api/settings")
     def settings():
         return {**store.public(), "default_prompt": PROMPT}
@@ -97,7 +112,10 @@ def create_app(service=None, settings_store=None):
         settings = store.snapshot()
         if use_ai and (not settings.enabled or not settings.ready):
             raise HTTPException(400, "请先在 AI 设置中启用并保存接口配置")
-        job_id = service.register(filename, speakers, use_ai)
+        try:
+            job_id = service.register(filename, speakers, use_ai)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         path = service.directory(job_id) / ("upload" + extension)
         size = 0
         try:

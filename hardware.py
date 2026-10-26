@@ -11,6 +11,24 @@ from functools import lru_cache
 from pathlib import Path
 
 
+def memory_status():
+    """Current Windows RAM, without WMI permissions or importing torch."""
+    if os.name != "nt":
+        return {}
+    try:
+        import ctypes
+        class Status(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                (name, ctypes.c_ulonglong) for name in ("total", "available", "page", "free_page", "virtual", "free_virtual", "extended")]
+        status = Status()
+        status.length = ctypes.sizeof(Status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return {"total_gb": round(status.total / 2**30, 1), "available_gb": round(status.available / 2**30, 1)}
+    except (OSError, AttributeError):
+        pass
+    return {}
+
+
 def _run(command, timeout=15):
     try:
         process = subprocess.run(command, capture_output=True, timeout=timeout,

@@ -19,8 +19,9 @@ class AISettings(BaseModel):
     api_key: str = Field(default="", repr=False)
     transport: str = "table"
     prompt: str = PROMPT
-    timeout: int = Field(default=180, ge=15, le=900)
-    max_tokens: int = Field(default=8192, ge=1024, le=65536)
+    timeout: int = Field(default=900, ge=15, le=900)
+    max_tokens: int = Field(default=40960, ge=1024, le=65536)
+    batch_rows: int = Field(default=100, ge=10, le=500)
 
     @field_validator("base_url")
     @classmethod

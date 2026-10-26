@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from hardware import backend_matches, hardware_plan
+from asr_config import PROFILES, selected_profile, models_ready as check_models_ready
 
 
 def inspect_environment():
@@ -40,18 +41,8 @@ def inspect_environment():
             ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         except (RuntimeError, OSError):
             pass
-    models_ready = False
-    manifest = ROOT / "models" / "local_paths.json"
-    try:
-        paths = json.loads(manifest.read_text(encoding="utf-8-sig"))
-        models_ready = all(
-            (ROOT / paths[name] / "config.yaml").is_file()
-            and (ROOT / paths[name] / weight).is_file()
-            for name, weight in (("model", "model.pt"), ("vad_model", "model.pt"),
-                                 ("punc_model", "model.pt"), ("spk_model", "campplus_cn_common.bin"))
-        )
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
+    profile = selected_profile()
+    models_ready = check_models_ready(profile)
     hardware = hardware_plan()
     try:
         torch_version = metadata.version("torch")
@@ -63,7 +54,8 @@ def inspect_environment():
                            and backend_matches(audio_version, hardware["backend"]))
     result = {"python_ok": sys.version_info[:2] == (3, 12), "python": sys.version.split()[0],
               "packages_ok": not missing, "missing": missing,
-              "models_ready": models_ready, "ffmpeg_ok": bool(ffmpeg),
+              "models_ready": models_ready, "asr_profile": profile,
+              "asr_model": PROFILES[profile]["label"], "ffmpeg_ok": bool(ffmpeg),
               "hardware": hardware, "torch_version": torch_version, "acceleration_ok": acceleration_ok}
     result["ready"] = all(result[key] for key in ("python_ok", "packages_ok", "models_ready", "ffmpeg_ok"))
     return result
