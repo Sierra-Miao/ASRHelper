@@ -1,0 +1,31 @@
+# Local Python environment, installer tools and download caches
+/.venv/
+/.venv.backup-*/
+/.uv-cache/
+/.tools/
+
+# Downloaded models, sample audio and generated transcription results
+/models/
+/samples/
+/outputs/
+
+# API credentials, uploaded audio, job history and temporary files
+/data/
+.env
+.env.*
+!.env.example
+
+# Python bytecode, test caches and local build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+*.whl
+/build/
+/dist/
+/test-results/

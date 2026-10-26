@@ -1,0 +1,12 @@
+funasr==1.4.16
+torch==2.8.0
+torchaudio==2.8.0
+transformers>=4.45,<5
+setuptools<81
+packaging
+fastapi>=0.115,<1
+uvicorn>=0.32,<1
+python-multipart>=0.0.20,<1
+openpyxl>=3.1.5,<4
+httpx>=0.28,<1
+imageio-ffmpeg>=0.6,<1
