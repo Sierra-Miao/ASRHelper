@@ -83,7 +83,7 @@ for (const id of ["ensemble-primary", "ensemble-reference"]) $("#" + id).addEven
 });
 function fillQwenForm() {
   const qwen = modelState.qwen;
-  for (const [id, key] of [["url", "base_url"], ["model", "model"], ["language", "language"], ["timeout", "timeout"], ["chunk", "chunk_seconds"], ["context", "context"]]) $("#qwen-" + id).value = qwen[key];
+  for (const [id, key] of [["url", "base_url"], ["model", "model"], ["language", "language"], ["timeout", "timeout"], ["context", "context"]]) $("#qwen-" + id).value = qwen[key];
   $("#qwen-key").value = ""; $("#qwen-clear-key").checked = false;
   $("#qwen-key-state").textContent = qwen.has_api_key ? "已保存；留空保留" : "尚未保存";
 }
@@ -92,7 +92,7 @@ $("#qwen-form").addEventListener("submit", async event => {
   try {
     const body = {api_key: $("#qwen-key").value, keep_key: !$("#qwen-clear-key").checked,
       base_url: $("#qwen-url").value, model: $("#qwen-model").value, language: $("#qwen-language").value,
-      timeout: Number($("#qwen-timeout").value), chunk_seconds: Number($("#qwen-chunk").value), context: $("#qwen-context").value};
+      timeout: Number($("#qwen-timeout").value), context: $("#qwen-context").value};
     await api("/api/qwen-settings", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
     await loadModels(); fillQwenForm(); $("#qwen-message").textContent = "已保存到本机 JSON。选择组合并点击启用后生效；保存配置不会调用云端。";
   } catch (error) { $("#qwen-message").textContent = error.message; }

@@ -7,6 +7,9 @@ set "APP_EXIT_CODE=%ERRORLEVEL%"
 if not "%APP_EXIT_CODE%"=="0" (
   echo.
   echo Startup did not complete. Please review the message above.
-  pause
 )
+echo.
+echo The backend launcher has stopped. This terminal remains open for troubleshooting.
+echo Backend logs are shown above. Close the window manually when finished.
+cmd.exe /d /k
 exit /b %APP_EXIT_CODE%

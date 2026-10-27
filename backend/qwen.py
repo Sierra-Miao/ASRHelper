@@ -2,7 +2,6 @@
 import base64
 import io
 import json
-import math
 import re
 import wave
 from pathlib import Path
@@ -10,6 +9,7 @@ from threading import Lock
 
 from pydantic import BaseModel, Field, field_validator
 from .config import DATA
+from .audio import detect_silences, pause_chunks, MIN_CHUNK_SECONDS, MAX_CHUNK_SECONDS
 
 
 class QwenSettings(BaseModel):
@@ -17,7 +17,6 @@ class QwenSettings(BaseModel):
     base_url: str = "https://dashscope.aliyuncs.com/api/v1"
     model: str = "qwen3-asr-flash"
     timeout: int = Field(default=900, ge=15, le=900)
-    chunk_seconds: int = Field(default=120, ge=10, le=180)
     language: str = ""
     context: str = Field(default="", max_length=5000)
 
@@ -72,7 +71,8 @@ class QwenStore:
 
     def public(self):
         settings = self.snapshot()
-        return {**settings.model_dump(exclude={"api_key"}), "has_api_key": bool(settings.api_key), "ready": bool(settings.api_key)}
+        return {**settings.model_dump(exclude={"api_key"}), "has_api_key": bool(settings.api_key), "ready": bool(settings.api_key),
+                "chunking": {"mode": "silence", "minimum_seconds": MIN_CHUNK_SECONDS, "maximum_seconds": MAX_CHUNK_SECONDS}}
 
     def update(self, settings, keep_key=True):
         with self.lock:
@@ -103,16 +103,19 @@ class QwenASR:
             caller = MultiModalConversation.call
         progress = progress or (lambda _: None)
         segments = []
-        # Service has already decoded to mono 16k PCM. Integer sample boundaries
-        # cover the entire recording including the final short block.
+        # FFmpeg detects pauses locally; PCM slicing uses exact sample positions
+        # without another encoding pass, dropping silence, or overlapping uploads.
         with wave.open(str(input), "rb") as audio:
             rate, width, channels = audio.getframerate(), audio.getsampwidth(), audio.getnchannels()
             if (rate, width, channels) != (16000, 2, 1):
                 raise ValueError("在线识别需要单声道 16 kHz PCM 音频，请通过网页上传并解码")
-            total, offset = audio.getnframes(), 0
-            block = rate * self.settings.chunk_seconds
-            while offset < total:
-                count = min(block, total - offset)
+            total = audio.getnframes()
+            progress("Qwen3-ASR：正在本机通过 FFmpeg 检测停顿，规划 10–60 秒音频片段（主稿已保存）")
+            pauses = detect_silences(input, total / rate) if total >= 2 * MIN_CHUNK_SECONDS * rate else []
+            blocks = pause_chunks(total, rate, pauses)
+            for index, (offset, end) in enumerate(blocks, 1):
+                count = end - offset
+                audio.setpos(offset)
                 pcm = audio.readframes(count)
                 if len(pcm) != count * width * channels:
                     raise ValueError("在线识别读取音频不完整，主稿已保留")
@@ -128,7 +131,7 @@ class QwenASR:
                 options = {"enable_itn": True}
                 if self.settings.language:
                     options["language"] = self.settings.language
-                progress(f"Qwen3-ASR 在线参考：{offset // block + 1}/{math.ceil(total / block)} 块（主稿已保存）")
+                progress(f"Qwen3-ASR 在线参考：{index}/{len(blocks)} 段 · {count / rate:.1f} 秒（主稿已保存）")
                 try:
                     response = caller(model=self.settings.model, api_key=self.settings.api_key,
                         base_address=self.settings.base_url, messages=messages, result_format="message",
@@ -152,7 +155,6 @@ class QwenASR:
                     raise ValueError("Qwen3-ASR 响应缺失或被截断，参考识别未完成；主稿已保留") from None
                 if text.strip():
                     segments.append({"start": round(offset * 1000 / rate), "end": round((offset + count) * 1000 / rate), "text": text.strip()})
-                offset += count
         if not segments:
             raise ValueError("Qwen3-ASR 没有返回有效参考文字；主稿已保留")
         return [{"sentence_info": segments}]

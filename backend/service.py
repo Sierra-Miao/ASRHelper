@@ -20,17 +20,10 @@ from .qwen import QwenStore
 from .diagnostics import coverage
 from .numbers import normalize_numbers
 from .paragraphs import local_paragraphs
+from .audio import ffmpeg_executable
 from speaker_config import SPEAKERS, selected_speaker, speaker_path
 
 ACTIVE = {"queued", "loading", "decoding", "transcribing", "exporting", "correcting"}
-
-
-def ffmpeg_executable():
-    executable = shutil.which("ffmpeg")
-    if executable:
-        return executable
-    import imageio_ffmpeg
-    return imageio_ffmpeg.get_ffmpeg_exe()
 
 
 def safe_name(filename):
