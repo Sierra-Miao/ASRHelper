@@ -79,6 +79,17 @@ def create_app(service=None, settings_store=None):
     def qwen_settings():
         return service.qwen_store.public()
 
+    class SpeakerSelection(BaseModel):
+        model: str
+        allow_download: bool = False
+
+    @app.post("/api/speakers/activate", status_code=202)
+    def activate_speaker(body: SpeakerSelection):
+        try:
+            return service.activate_speaker(body.model, body.allow_download)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     class QwenUpdate(QwenSettings):
         keep_key: bool = True
 

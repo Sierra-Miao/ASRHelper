@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from hardware import backend_matches, hardware_plan
 from asr_config import PROFILES, selected_profile, models_ready as check_models_ready
+from speaker_config import selected_speaker, SPEAKERS
 
 
 def inspect_environment():
@@ -55,6 +56,7 @@ def inspect_environment():
     result = {"python_ok": sys.version_info[:2] == (3, 12), "python": sys.version.split()[0],
               "packages_ok": not missing, "missing": missing,
               "models_ready": models_ready, "asr_profile": profile,
+              "speaker_model": selected_speaker(), "speaker_model_name": SPEAKERS[selected_speaker()]["name"],
               "asr_model": PROFILES[profile]["label"], "ffmpeg_ok": bool(ffmpeg),
               "hardware": hardware, "torch_version": torch_version, "acceleration_ok": acceleration_ok}
     result["ready"] = all(result[key] for key in ("python_ok", "packages_ok", "models_ready", "ffmpeg_ok"))

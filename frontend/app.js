@@ -99,7 +99,7 @@ function renderTable() {
     tr.append(content); tbody.append(tr);
   });
   if (!rows.length) { const tr = document.createElement("tr"), td = document.createElement("td"); td.colSpan = 4; td.textContent = "没有找到匹配内容"; tr.append(td); tbody.append(tr); }
-  $("#row-summary").textContent = query ? `找到 ${rows.length} / ${all.length} 条记录` : `共 ${rows.length} 条记录 · 沿用原时间，显示到毫秒`;
+  $("#row-summary").textContent = query ? `找到 ${rows.length} / ${all.length} 条记录` : `共 ${rows.length} 条记录 · ${state.job.speaker_model_name || "CAM++（历史任务）"} · 沿用原时间`;
   $("#page-number").textContent = `${state.page} / ${pages}`; $("#prev-page").disabled = state.page <= 1; $("#next-page").disabled = state.page >= pages;
 }
 for (const variant of ["original", "paragraphs", "corrected"]) $(`#tab-${variant}`).addEventListener("click", () => { state.tab = variant; state.page = 1; renderTable(); });

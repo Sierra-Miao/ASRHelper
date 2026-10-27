@@ -16,17 +16,23 @@ def release_model():
         torch.cuda.empty_cache()
 
 
-def prepare_profile(profile):
+def prepare_profile(profile, speaker=None):
     """Fetch weights/configs only; do not hold two initialized models in memory."""
-    if models_ready(profile):
+    if models_ready(profile, speaker=speaker):
         return
     # Import transcribe first to establish the project's cache directories.
     import transcribe
     from funasr.download.download_model_from_hub import download_model
     names = {k: v for k, v in PROFILES[profile].items() if k != "label"}
-    names.update(local_models(profile))
+    names.update(local_models(profile, speaker=speaker))
     paths = {}
     for key, name in names.items():
+        if key == "spk_model":
+            from .speakers import prepare_speaker
+            from speaker_config import selected_speaker
+            path = prepare_speaker(speaker or selected_speaker()).resolve()
+            paths[key] = os.path.relpath(path, ROOT)
+            continue
         config = download_model(model=name, hub="ms", trust_remote_code=False)
         path = Path(config["model_path"]).resolve()
         weight = "campplus_cn_common.bin" if key == "spk_model" else "model.pt"
@@ -38,12 +44,12 @@ def prepare_profile(profile):
     temporary = manifest.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(paths, indent=2), encoding="utf-8")
     temporary.replace(manifest)
-    if not models_ready(profile):
+    if not models_ready(profile, speaker=speaker):
         raise ValueError(f"{profile} 模型配置或分词文件不完整，请重试下载")
 
 
 class SequentialEnsemble:
-    def __init__(self, prepare=False, loader=None, primary="sensevoice", reference="nano", qwen_settings=None):
+    def __init__(self, prepare=False, loader=None, primary="sensevoice", reference="nano", qwen_settings=None, speaker=None):
         if primary not in {"sensevoice", "paraformer"} or reference not in {"nano", "qwen"}:
             raise ValueError("双模型须选择一个传统模型和一个 LLM 语音模型")
         self.primary, self.reference = primary, reference
@@ -54,14 +60,15 @@ class SequentialEnsemble:
         self.reference_result = []
         self.warnings = []
         self.loader = loader
+        self.speaker = speaker
         if prepare:
-            prepare_profile(primary)
+            prepare_profile(primary, speaker)
             if reference == "nano":
-                prepare_profile("nano")
+                prepare_profile("nano", speaker)
 
     def generate(self, input, primary_callback=None, progress=None, **kwargs):
         from transcribe import load_pipeline
-        loader = self.loader or load_pipeline
+        loader = self.loader or (lambda profile: load_pipeline(profile, speaker=self.speaker))
         progress = progress or (lambda _: None)
         speakers = kwargs.get("preset_spk_num")
         self.reference_result, self.warnings = [], []

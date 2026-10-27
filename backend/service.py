@@ -20,6 +20,7 @@ from .qwen import QwenStore
 from .diagnostics import coverage
 from .numbers import normalize_numbers
 from .paragraphs import local_paragraphs
+from speaker_config import SPEAKERS, selected_speaker, speaker_path
 
 ACTIVE = {"queued", "loading", "decoding", "transcribing", "exporting", "correcting"}
 
@@ -49,6 +50,7 @@ class TranscriptionService:
         self.model_state = "not_loaded"
         self.profile = selected_profile(data_dir)
         self.ensemble = selected_ensemble(data_dir)
+        self.speaker = selected_speaker(data_dir)
         self.qwen_store = QwenStore(data_dir / "qwen_settings.json")
         self.model_action = {"status": "idle", "profile": self.profile, "message": "", "error": ""}
         self.hardware = hardware_plan()
@@ -75,21 +77,52 @@ class TranscriptionService:
             return {"selected": self.profile, "loaded": self.model is not None,
                     "busy": busy, "action": copy.deepcopy(self.model_action),
                     "memory": memory_status(), "ensemble": dict(self.ensemble), "qwen": self.qwen_store.public(),
+                    "speaker": self.speaker, "speakers": [{"id": key, **spec, "ready": bool(speaker_path(key))} for key, spec in SPEAKERS.items()],
                     "models": [{"id": key, **item, "ready": self.profile_ready(key),
                                 "selected": key == self.profile} for key, item in CATALOG.items()],
-                    "note": "内存和下载量为本项目估算；传统模型通过 CAM++ 区分匿名说话人。Qwen 是在线参考，不下载权重；使用时将上传音频，可能产生费用。"}
+                    "note": "内存和下载量为本项目估算；说话人模型独立选择。ERes2NetV2 先检测换人再转写，短轮次不再强制归并；时间是音频窗口边界，无法保证逐字准确或消除重叠讲话。指定人数必须是实际出声人数。Qwen 是在线参考，使用时上传音频并可能产生费用。"}
 
     def profile_ready(self, profile, choice=None):
         if profile != "ensemble":
-            return models_ready(profile)
+            return models_ready(profile, speaker=self.speaker)
         choice = choice or self.ensemble
-        return models_ready("ensemble", **choice) and (choice["reference"] != "qwen" or self.qwen_store.public()["ready"])
+        return models_ready("ensemble", **choice, speaker=self.speaker) and (choice["reference"] != "qwen" or self.qwen_store.public()["ready"])
 
     def load_selected(self, profile, choice=None):
         from transcribe import load_pipeline
         if profile == "ensemble":
-            return load_pipeline(profile, **(choice or self.ensemble), qwen_settings=self.qwen_store.snapshot())
-        return load_pipeline(profile)
+            return load_pipeline(profile, **(choice or self.ensemble), qwen_settings=self.qwen_store.snapshot(), speaker=self.speaker)
+        return load_pipeline(profile, speaker=self.speaker)
+
+    def activate_speaker(self, model, allow_download=False):
+        if model not in SPEAKERS:
+            raise ValueError("不支持此说话人模型")
+        with self.lock:
+            if self.model_catalog()["busy"]:
+                raise ValueError("正在处理任务，请完成后再切换说话人模型")
+            if not speaker_path(model) and not allow_download:
+                raise ValueError("说话人模型尚未下载，请点击“下载并启用”")
+            self.model_action = {"status": "loading", "profile": self.profile, "message": "正在准备说话人模型", "error": ""}
+            self.executor.submit(self._activate_speaker, model)
+        return self.model_catalog()
+
+    def _activate_speaker(self, model):
+        try:
+            self.model = None
+            self.model_state = "not_loaded"
+            from .ensemble import release_model
+            from .speakers import prepare_speaker
+            release_model()
+            prepare_speaker(model)
+            temporary = self.data_dir / "speaker_settings.json.tmp"
+            temporary.write_text(json.dumps({"model": model}), encoding="utf-8")
+            temporary.replace(self.data_dir / "speaker_settings.json")
+            with self.lock:
+                self.speaker = model
+                self.model_action.update(status="completed", message="说话人模型已切换，下次转写使用新模型；历史结果不变", error="")
+        except Exception as exc:
+            logging.exception("Speaker backend preparation failed")
+            self.model_action.update(status="failed", message="说话人模型未切换，原选择保留", error=recognition_error(exc, downloading=True))
 
     def activate_model(self, profile, allow_download=False, primary=None, reference=None):
         if profile not in PROFILES:
@@ -191,6 +224,7 @@ class TranscriptionService:
                 raise ValueError("请先在“语音模型”中下载并启用一个模型")
             self.directory(job_id).mkdir(parents=True)
             self.jobs[job_id] = {"id": job_id, "filename": safe_name(filename), "speakers": speakers,
+                "speaker_model": self.speaker, "speaker_model_name": SPEAKERS[self.speaker]["name"],
                 "asr_profile": self.profile, "asr_model": PROFILES[self.profile]["label"],
                 "use_ai": use_ai, "created_at": datetime.now(timezone.utc).isoformat(),
                 "status": "queued", "stage": "等待处理", "rows": [], "corrected_rows": [],
@@ -282,6 +316,8 @@ class TranscriptionService:
             row["content"] = normalize_numbers(row["content"])
         paragraphs = local_paragraphs(rows)
         report, warnings = coverage(rows, self.get(job_id)["duration_ms"])
+        for item in result:
+            warnings.extend(item.get("warnings", []))
         original_pending = directory / "original.pending.xlsx"
         write_excel(rows, original_pending, "原始识别")
         original_pending.replace(directory / "original.xlsx")

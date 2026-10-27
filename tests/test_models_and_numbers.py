@@ -73,9 +73,9 @@ class Models(unittest.TestCase):
         manifest = manifest_path("paraformer", self.root)
         manifest.parent.mkdir()
         manifest.write_text(json.dumps(paths), encoding="utf-8")
-        self.assertTrue(models_ready("paraformer", self.root))
+        self.assertTrue(models_ready("paraformer", self.root, speaker="cam++"))
         self.assertFalse(models_ready("nano", self.root))
-        self.assertEqual(set(local_models("nano", self.root)), {"vad_model", "spk_model"})
+        self.assertEqual(set(local_models("nano", self.root, speaker="cam++")), {"vad_model", "spk_model"})
 
     def service(self):
         with patch("backend.service.hardware_plan", return_value={"cpu_threads": 2}):
@@ -99,7 +99,7 @@ class Models(unittest.TestCase):
                         break
                     time.sleep(.02)
                 self.assertEqual(service.model_action["status"], "completed", service.model_action)
-                loader.assert_called_once_with("sensevoice")
+                loader.assert_called_once_with("sensevoice", speaker="eres2netv2")
                 with patch.dict("os.environ", {"FUNASR_ASR_MODEL": ""}):
                     # Explicit overrides are tested separately from persisted defaults.
                     import os

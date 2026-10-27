@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from asr_config import PROFILES, selected_profile, local_models, manifest_path, recognition_options
+from speaker_config import selected_speaker
 
 ROOT = Path(__file__).resolve().parent
 os.environ.setdefault("MODELSCOPE_CACHE", str(ROOT / "models" / "modelscope"))
@@ -14,14 +15,15 @@ os.environ.setdefault("NUMBA_CACHE_DIR", str(ROOT / "models" / "numba"))
 os.environ.setdefault("PYTHONUTF8", "1")
 
 
-def load_pipeline(profile=None, primary=None, reference=None, qwen_settings=None):
+def load_pipeline(profile=None, primary=None, reference=None, qwen_settings=None, speaker=None):
     profile = profile or selected_profile()
+    speaker = speaker or selected_speaker()
     if profile == "ensemble":
         from backend.ensemble import SequentialEnsemble
         from asr_config import selected_ensemble
         choice = selected_ensemble()
         return SequentialEnsemble(prepare=True, primary=primary or choice["primary"],
-                                  reference=reference or choice["reference"], qwen_settings=qwen_settings)
+                                  reference=reference or choice["reference"], qwen_settings=qwen_settings, speaker=speaker)
     from hardware import memory_status
     memory = memory_status()
     minimum = {"nano": 6, "sensevoice": 1.5, "paraformer": 1.5}[profile]
@@ -33,10 +35,14 @@ def load_pipeline(profile=None, primary=None, reference=None, qwen_settings=None
     device, reason = select_runtime_device(torch)
     print(reason, flush=True)
     from funasr import AutoModel
+    from backend.speakers import prepare_speaker, register_eres2net, configure_clustering
+    if speaker == "eres2netv2":
+        register_eres2net()
 
     print(PROFILES[profile]["label"], flush=True)
     names = {key: value for key, value in PROFILES[profile].items() if key != "label"}
-    names.update(local_models(profile))
+    names.update(local_models(profile, speaker=speaker))
+    names["spk_model"] = str(prepare_speaker(speaker))
     manifest = manifest_path(profile)
     extra = {"vad_kwargs": {"max_single_segment_time": 30000}}
     if profile == "nano":
@@ -49,6 +55,7 @@ def load_pipeline(profile=None, primary=None, reference=None, qwen_settings=None
         device=device,
         ncpu=hardware_plan()["cpu_threads"],
         disable_update=True,
+        disable_pbar=True,
     )
     paths = {}
     for name, config in (
@@ -63,7 +70,7 @@ def load_pipeline(profile=None, primary=None, reference=None, qwen_settings=None
         paths[name] = os.path.relpath(path, ROOT)
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps(paths, indent=2), encoding="utf-8")
-    return model
+    return configure_clustering(model, speaker)
 
 
 def timestamp(milliseconds, separator=","):

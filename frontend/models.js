@@ -2,12 +2,24 @@
 let modelState = null;
 let modelPollTimer;
 let ensembleDraft = null;
+let speakerDraft = null;
+function renderSpeakerDescription() {
+  const item = modelState.speakers.find(item => item.id === $("#speaker-model").value);
+  $("#speaker-description").textContent = item.description + (item.ready ? " 已下载。" : " 首次使用需下载模型权重。");
+  $("#speaker-source").href = item.source;
+  $("#activate-speaker").textContent = item.id === modelState.speaker && item.ready ? "当前使用" : item.ready ? "启用此说话人模型" : "下载并启用";
+  $("#activate-speaker").disabled = modelState.busy || (item.id === modelState.speaker && item.ready);
+}
 function updateStartAvailability() {
   const current = modelState?.models.find(item => item.id === modelState.selected);
   $("#start-button").disabled = !state.file || state.uploading || !current?.ready || modelState?.action.status === "loading";
 }
 function renderModels() {
   if (!modelState) return;
+  if (!speakerDraft) speakerDraft = modelState.speaker;
+  const select = $("#speaker-model"); select.replaceChildren();
+  for (const item of modelState.speakers) { const option = document.createElement("option"); option.value = item.id; option.textContent = item.name; select.append(option); }
+  select.value = speakerDraft; renderSpeakerDescription();
   const current = modelState.models.find(item => item.id === modelState.selected);
   const online = current?.id === "ensemble" && modelState.ensemble.reference === "qwen";
   const primaryName = modelState.ensemble.primary === "paraformer" ? "Paraformer" : "SenseVoice";
@@ -55,10 +67,17 @@ async function activateModel(item) {
   } catch (error) { toast(error.message); await loadModels().catch(() => {}); }
 }
 document.querySelectorAll("[data-open-models]").forEach(button => button.addEventListener("click", async () => {
-  $("#models-dialog").showModal(); try { ensembleDraft = null; await loadModels(); fillQwenForm(); } catch (error) { toast(error.message); }
+  $("#models-dialog").showModal(); try { ensembleDraft = null; speakerDraft = null; await loadModels(); fillQwenForm(); } catch (error) { toast(error.message); }
 }));
 $("#close-models").addEventListener("click", () => $("#models-dialog").close());
 $("#activate-ensemble").addEventListener("click", () => activateModel({id: "ensemble"}));
+$("#speaker-model").addEventListener("change", () => { speakerDraft = $("#speaker-model").value; renderSpeakerDescription(); });
+$("#activate-speaker").addEventListener("click", async () => {
+  try {
+    modelState = await api("/api/speakers/activate", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({model: speakerDraft, allow_download: true})});
+    renderModels(); await loadModels();
+  } catch (error) { toast(error.message); }
+});
 for (const id of ["ensemble-primary", "ensemble-reference"]) $("#" + id).addEventListener("change", () => {
   ensembleDraft = {primary: $("#ensemble-primary").value, reference: $("#ensemble-reference").value}; renderModels();
 });
